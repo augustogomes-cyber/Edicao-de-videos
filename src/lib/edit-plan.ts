@@ -27,7 +27,7 @@ export function buildPlan(clips: Clip[], style: Style, target: number, seed = 1)
   let total = 0;
   let i = 0;
   while (total < target - 0.05 && i < 500) {
-    const clip = usable[i % usable.length];
+    const clip = usable[i % usable.length]!;
     const want = Math.min(cfg.seg[0] + rand() * (cfg.seg[1] - cfg.seg[0]), (target - total) * cfg.speed);
     const len = Math.min(want, clip.duration);
     const start = Math.max(0, rand() * (clip.duration - len));

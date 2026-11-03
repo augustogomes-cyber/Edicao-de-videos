@@ -8,7 +8,7 @@ describe("buildPlan", () => {
     expect(Math.abs(planLength(buildPlan(clips, "fast", 30)) - 30)).toBeLessThan(0.1);
   });
   it("cinematic uses slow motion", () => {
-    expect(buildPlan(clips, "cinematic", 15)[0].speed).toBeLessThan(1);
+    expect(buildPlan(clips, "cinematic", 15)[0]!.speed).toBeLessThan(1);
   });
   it("segments stay inside their clip", () => {
     for (const s of buildPlan(clips, "story", 60)) {
