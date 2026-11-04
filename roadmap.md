@@ -4,4 +4,4 @@
 - [ ] Conectar Supabase próprio (bloqueado: usuário conecta em Settings → External Supabase)
 - [ ] Login, tabelas, bucket e Edge Functions com Gemini (depende do Supabase)
 - [ ] Exportar MP4 com ffmpeg.wasm
-- [ ] Deploy GitHub Pages (bloqueado: conectar GitHub)
+- [ ] Deploy GitHub Pages (workflow criado; bloqueado: repo privado em plano gratuito — precisa ser público)
