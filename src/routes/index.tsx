@@ -48,18 +48,34 @@ function Studio() {
   const [seed, setSeed] = useState(1);
 
   const addFiles = (files: FileList | null) => {
-    if (!files) return;
-    Array.from(files).filter((f) => f.type.startsWith("video/")).forEach((f) => {
-      const url = URL.createObjectURL(f);
-      const v = document.createElement("video");
-      v.preload = "metadata";
-      v.onloadedmetadata = () =>
-        setClips((c) => [...c, { id: crypto.randomUUID(), name: f.name, url, duration: v.duration }]);
-      v.src = url;
-    });
+    if (!files || !files.length) return;
+    const isVideo = (f: File) => f.type.startsWith("video/") || /\.(mp4|mov|m4v|webm|mkv|avi|3gp|hevc)$/i.test(f.name);
+    const added: Clip[] = Array.from(files).filter(isVideo).map((f) => ({
+      id: crypto.randomUUID(), name: f.name, url: URL.createObjectURL(f), duration: 0,
+    }));
+    if (!added.length) return;
+    setClips((c) => [...c, ...added]);
+    // Read durations a few at a time so hundreds of files don't freeze the browser
+    const queue = [...added];
+    const worker = async () => {
+      for (let clip = queue.shift(); clip; clip = queue.shift()) {
+        const d = await new Promise<number>((res) => {
+          const v = document.createElement("video");
+          const done = (n: number) => { v.removeAttribute("src"); v.load(); res(n); };
+          const t = setTimeout(() => done(10), 8000);
+          v.preload = "metadata"; v.muted = true;
+          v.onloadedmetadata = () => { clearTimeout(t); done(Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 10); };
+          v.onerror = () => { clearTimeout(t); done(10); };
+          v.src = clip!.url;
+        });
+        const id = clip.id;
+        setClips((c) => c.map((x) => (x.id === id ? { ...x, duration: d } : x)));
+      }
+    };
+    Array.from({ length: 4 }, worker);
   };
 
-  const generate = (s = seed) => { setPlan(buildPlan(clips, style, duration, s)); setStep(6); };
+  const generate = (s = seed) => { setPlan(buildPlan(clips.map((c) => (c.duration ? c : { ...c, duration: 10 })), style, duration, s)); setStep(6); };
   const canNext = step !== 0 || clips.length > 0;
 
   return (
@@ -91,15 +107,21 @@ function Studio() {
               <span className="text-sm">ou clique para escolher</span>
               <input type="file" accept="video/*" multiple className="hidden" onChange={(e) => addFiles(e.target.files)} />
             </label>
-            <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
-              {clips.map((c) => (
+            {clips.length > 0 && (
+              <div className="mt-4 flex items-center justify-between font-mono text-xs text-muted-foreground">
+                <span>{clips.length} vídeos · {clips.filter((c) => !c.duration).length > 0 ? `lendo ${clips.filter((c) => !c.duration).length}…` : "prontos"}</span>
+                <button className="text-destructive" onClick={() => setClips([])}>Remover todos</button>
+              </div>
+            )}
+            <div className="mt-2 grid max-h-[420px] grid-cols-2 gap-2 overflow-auto pr-1 sm:grid-cols-4">
+              {clips.map((c, i) => (
                 <div key={c.id} className="overflow-hidden rounded-lg border border-border bg-background">
-                  <video src={c.url} className="aspect-video w-full object-cover" muted />
-                  <div className="flex items-center justify-between p-2 text-xs">
+                  {i < 24 && <video src={c.url} preload="metadata" className="aspect-video w-full object-cover" muted />}
+                  <div className="flex items-center justify-between gap-2 p-2 text-xs">
                     <span className="truncate">{c.name}</span>
                     <button className="text-destructive" onClick={() => setClips((x) => x.filter((y) => y.id !== c.id))}>✕</button>
                   </div>
-                  <p className="px-2 pb-2 font-mono text-xs text-muted-foreground">{c.duration.toFixed(1)}s</p>
+                  <p className="px-2 pb-2 font-mono text-xs text-muted-foreground">{c.duration ? `${c.duration.toFixed(1)}s` : "…"}</p>
                 </div>
               ))}
             </div>
