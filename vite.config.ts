@@ -9,7 +9,7 @@ import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 // GitHub Actions sets GITHUB_REPOSITORY ("owner/repo"); the repo name becomes
 // the base path so the static build works at <user>.github.io/<repo>/.
 // Locally and on Lovable hosting the base stays "/".
-const pagesRepo = process.env.GITHUB_REPOSITORY?.split("/")[1];
+const pagesRepo = process.env["GITHUB_REPOSITORY"]?.split("/")[1];
 
 export default defineConfig({
   vite: {
