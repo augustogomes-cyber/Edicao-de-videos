@@ -35,15 +35,14 @@ export function buildPlan(clips: Clip[], style: Style, target: number, seed = 1)
   while (total < target - 0.05 && i < 3000) {
     const clip = usable[i % usable.length]!;
     const transition = i === 0 ? "cut" : cfg.transition;
-    const overlap = transitionDuration(transition, cfg.seg[1] / cfg.speed);
-    const want = Math.min(cfg.seg[0] + rand() * (cfg.seg[1] - cfg.seg[0]), (target - total + overlap) * cfg.speed);
+    const want = Math.min(cfg.seg[0] + rand() * (cfg.seg[1] - cfg.seg[0]), (target - total) * cfg.speed);
     const len = Math.min(want, clip.duration);
     const start = Math.max(0, rand() * (clip.duration - len));
     out.push({ clipId: clip.id, start, end: start + len, speed: cfg.speed, transition, zoom: cfg.zoom, reason: cfg.label });
-    total += len / cfg.speed - transitionDuration(transition, len / cfg.speed);
+    total += len / cfg.speed;
     i++;
   }
   return out;
 }
 
-export const planLength = (p: Segment[]) => p.reduce((s, x) => s + (x.end - x.start) / x.speed - transitionDuration(x.transition, (x.end - x.start) / x.speed), 0);
+export const planLength = (p: Segment[]) => p.reduce((s, x) => s + (x.end - x.start) / x.speed, 0);
