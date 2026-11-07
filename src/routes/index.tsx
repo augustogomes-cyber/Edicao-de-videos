@@ -201,7 +201,7 @@ function Studio() {
         )}
 
         {step === 6 && (
-          <Result plan={plan} clips={clips} aspect={PLATFORMS.find((p) => p.id === platform)?.aspect ?? "aspect-[9/16]"} style={style}
+          <Result plan={plan} clips={clips} platform={platform} aspect={PLATFORMS.find((p) => p.id === platform)?.aspect ?? "aspect-[9/16]"} style={style}
             muted={audio === "music"} music={audio === "music" ? music : null} musicStart={musicStart}
             onRedo={() => { const s = seed + 1; setSeed(s); generate(s); }} />
         )}
@@ -224,14 +224,17 @@ function Grid({ title, children }: { title: string; children: React.ReactNode })
   return (<div><h2 className="text-xl font-semibold">{title}</h2><div className="mt-4 grid gap-3 sm:grid-cols-3">{children}</div></div>);
 }
 
-function Result({ plan, clips, aspect, style, muted, music, musicStart, onRedo }: {
-  plan: Segment[]; clips: Clip[]; aspect: string; muted: boolean;
+function Result({ plan, clips, platform, aspect, style, muted, music, musicStart, onRedo }: {
+  plan: Segment[]; clips: Clip[]; platform: Platform; aspect: string; muted: boolean;
   style: Style;
   music: { url: string } | null; musicStart: number; onRedo: () => void;
 }) {
   const vid = useRef<HTMLVideoElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const aud = useRef<HTMLAudioElement>(null);
+  const playbackFinished = useRef(false);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioSourceRef = useRef<MediaElementAudioSourceNode | null>(null);
   const [idx, setIdx] = useState(-1);
   const [exporting, setExporting] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -254,6 +257,7 @@ function Result({ plan, clips, aspect, style, muted, music, musicStart, onRedo }
       if (idx >= 0 && !finished) {
         if (video.currentTime >= (plan[idx]?.end ?? 0)) {
           finished = true;
+          if (idx + 1 >= plan.length) playbackFinished.current = true;
           setIdx((currentIdx) => currentIdx + 1 < plan.length ? currentIdx + 1 : -1);
         }
         frame = requestAnimationFrame(paint);
@@ -294,11 +298,16 @@ function Result({ plan, clips, aspect, style, muted, music, musicStart, onRedo }
     if (idx === -1) { a.pause(); }
   }, [idx, musicStart]);
 
-  useEffect(() => () => { if (downloadUrl) URL.revokeObjectURL(downloadUrl); }, [downloadUrl]);
+  useEffect(() => () => {
+    if (downloadUrl) URL.revokeObjectURL(downloadUrl);
+    if (audioContextRef.current) void audioContextRef.current.close();
+  }, [downloadUrl]);
 
   const playPreview = () => {
     setRenderError("");
-    setIdx(0);
+    playbackFinished.current = false;
+    setIdx(-1);
+    window.setTimeout(() => setIdx(0), 50);
   };
 
   const exportVideo = async () => {
@@ -316,19 +325,24 @@ function Result({ plan, clips, aspect, style, muted, music, musicStart, onRedo }
     setExporting(true);
 
     const canvasStream = currentCanvas.captureStream(30);
-    let audioContext: AudioContext | null = null;
     let recorderStream = canvasStream;
+    let extraTracks: MediaStreamTrack[] = [];
     try {
       if (music && aud.current) {
-        audioContext = new AudioContext();
-        const source = audioContext.createMediaElementSource(aud.current);
+        const audioContext = audioContextRef.current ?? new AudioContext();
+        audioContextRef.current = audioContext;
+        const source = audioSourceRef.current ?? audioContext.createMediaElementSource(aud.current);
+        audioSourceRef.current = source;
         const destination = audioContext.createMediaStreamDestination();
         source.connect(destination);
         source.connect(audioContext.destination);
         recorderStream = new MediaStream([...canvasStream.getVideoTracks(), ...destination.stream.getAudioTracks()]);
+        extraTracks = destination.stream.getAudioTracks();
+        if (audioContext.state === "suspended") await audioContext.resume();
       } else if (!muted && "captureStream" in video) {
         const sourceStream = (video as HTMLVideoElement & { captureStream: () => MediaStream }).captureStream();
         recorderStream = new MediaStream([...canvasStream.getVideoTracks(), ...sourceStream.getAudioTracks()]);
+        extraTracks = sourceStream.getAudioTracks();
       }
       const chunks: BlobPart[] = [];
       const recorder = new MediaRecorder(recorderStream, { mimeType });
@@ -338,21 +352,20 @@ function Result({ plan, clips, aspect, style, muted, music, musicStart, onRedo }
         recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType }));
       });
       recorder.start(500);
-      if (audioContext?.state === "suspended") await audioContext.resume();
       if (aud.current && music) { aud.current.currentTime = musicStart; void aud.current.play().catch(() => {}); }
-      setIdx(0);
+      playbackFinished.current = false;
+      setIdx(-1);
+      window.setTimeout(() => setIdx(0), 50);
       await new Promise<void>((resolve) => {
+        const length = Math.max(0.01, planLength(plan));
         const startAt = performance.now();
-        const update = () => {
+        const timer = window.setInterval(() => {
           const elapsed = (performance.now() - startAt) / 1000;
-          const length = Math.max(0.01, planLength(plan));
-          setProgress(Math.min(100, Math.round((elapsed / length) * 100)));
-          if (elapsed >= length || idx === -1) resolve();
-          else requestAnimationFrame(update);
-        };
-        requestAnimationFrame(update);
-        const checkDone = window.setInterval(() => {
-          if (idx === -1) { window.clearInterval(checkDone); resolve(); }
+          setProgress(Math.min(99, Math.round((elapsed / length) * 100)));
+          if (playbackFinished.current) {
+            window.clearInterval(timer);
+            resolve();
+          }
         }, 100);
       });
       recorder.stop();
@@ -366,7 +379,7 @@ function Result({ plan, clips, aspect, style, muted, music, musicStart, onRedo }
     } finally {
       recorderStream.getTracks().forEach((track) => track.stop());
       canvasStream.getTracks().forEach((track) => track.stop());
-      if (audioContext) await audioContext.close();
+      extraTracks.forEach((track) => track.stop());
       setExporting(false);
     }
   };
@@ -379,7 +392,7 @@ function Result({ plan, clips, aspect, style, muted, music, musicStart, onRedo }
     <div className="grid gap-6 md:grid-cols-[minmax(0,320px)_1fr]">
       <div>
         <div className={`${aspect} overflow-hidden rounded-lg bg-background`}>
-          <canvas ref={canvas} width={1080} height={1920} className="h-full w-full object-contain" aria-label="Prévia do vídeo editado" />
+          <canvas ref={canvas} width={platform === "youtube" ? 1920 : 1080} height={platform === "youtube" ? 1080 : platform === "feed" ? 1080 : 1920} className="h-full w-full object-contain" aria-label="Prévia do vídeo editado" />
           <video ref={vid} muted={muted} playsInline className="hidden" />
         </div>
         {music && <audio ref={aud} src={music.url} />}
