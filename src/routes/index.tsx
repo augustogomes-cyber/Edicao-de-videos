@@ -1,6 +1,9 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
-import { buildPlan, planLength, type Clip, type Platform, type Segment, type Style } from "@/lib/edit-plan";
+import { Download, LoaderCircle, Play, RotateCcw } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { buildPlan, frameEffects, planLength, type Clip, type Platform, type Segment, type Style } from "@/lib/edit-plan";
+import { drawEditedFrame, recordingMimeType } from "@/lib/video-renderer";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -198,7 +201,7 @@ function Studio() {
         )}
 
         {step === 6 && (
-          <Result plan={plan} clips={clips} aspect={PLATFORMS.find((p) => p.id === platform)!.aspect}
+          <Result plan={plan} clips={clips} platform={platform} aspect={PLATFORMS.find((p) => p.id === platform)?.aspect ?? "aspect-[9/16]"} style={style}
             muted={audio === "music"} music={audio === "music" ? music : null} musicStart={musicStart}
             onRedo={() => { const s = seed + 1; setSeed(s); generate(s); }} />
         )}
@@ -221,47 +224,194 @@ function Grid({ title, children }: { title: string; children: React.ReactNode })
   return (<div><h2 className="text-xl font-semibold">{title}</h2><div className="mt-4 grid gap-3 sm:grid-cols-3">{children}</div></div>);
 }
 
-function Result({ plan, clips, aspect, muted, music, musicStart, onRedo }: {
-  plan: Segment[]; clips: Clip[]; aspect: string; muted: boolean;
+function Result({ plan, clips, platform, aspect, style, muted, music, musicStart, onRedo }: {
+  plan: Segment[]; clips: Clip[]; platform: Platform; aspect: string; muted: boolean;
+  style: Style;
   music: { url: string } | null; musicStart: number; onRedo: () => void;
 }) {
   const vid = useRef<HTMLVideoElement>(null);
+  const canvas = useRef<HTMLCanvasElement>(null);
   const aud = useRef<HTMLAudioElement>(null);
+  const playbackFinished = useRef(false);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioSourceRef = useRef<MediaElementAudioSourceNode | null>(null);
   const [idx, setIdx] = useState(-1);
+  const [exporting, setExporting] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [downloadUrl, setDownloadUrl] = useState("");
+  const [renderError, setRenderError] = useState("");
   const seg = idx >= 0 ? plan[idx] : null;
 
   useEffect(() => {
-    const v = vid.current; if (!v || !seg) return;
-    const clip = clips.find((c) => c.id === seg.clipId)!;
-    if (v.src !== clip.url) v.src = clip.url;
-    v.currentTime = seg.start; v.playbackRate = seg.speed; v.play().catch(() => {});
-    const tick = () => { if (v.currentTime >= seg.end) setIdx((i) => (i + 1 < plan.length ? i + 1 : -1)); };
-    v.addEventListener("timeupdate", tick);
-    return () => v.removeEventListener("timeupdate", tick);
-  }, [idx]); // eslint-disable-line react-hooks/exhaustive-deps
+    const video = vid.current;
+    const currentCanvas = canvas.current;
+    if (!video || !currentCanvas) return;
+    let frame = 0;
+    let finished = false;
+    const paint = () => {
+      const current = plan[idx];
+      if (current && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+        const clip = clips.find((item) => item.id === current.clipId);
+        if (clip) drawEditedFrame(currentCanvas, video, current, style, (video.currentTime - current.start) / current.speed);
+      }
+      if (idx >= 0 && !finished) {
+        if (video.currentTime >= (plan[idx]?.end ?? 0)) {
+          finished = true;
+          if (idx + 1 >= plan.length) playbackFinished.current = true;
+          setIdx((currentIdx) => currentIdx + 1 < plan.length ? currentIdx + 1 : -1);
+        }
+        frame = requestAnimationFrame(paint);
+      }
+    };
+    if (idx >= 0) {
+      const current = plan[idx];
+      const clip = current ? clips.find((item) => item.id === current.clipId) : undefined;
+      if (!current || !clip) { setIdx(-1); return; }
+      const startSegment = () => {
+        video.currentTime = current.start;
+        video.playbackRate = current.speed;
+        void video.play().then(() => { frame = requestAnimationFrame(paint); }).catch(() => {});
+      };
+      if (video.src !== clip.url) {
+        video.src = clip.url;
+        video.load();
+        video.addEventListener("loadedmetadata", startSegment, { once: true });
+      } else if (video.readyState >= HTMLMediaElement.HAVE_METADATA) {
+        startSegment();
+      } else {
+        video.addEventListener("loadedmetadata", startSegment, { once: true });
+      }
+      return () => {
+        cancelAnimationFrame(frame);
+        video.removeEventListener("loadedmetadata", startSegment);
+      };
+    }
+    video.pause();
+    const context = currentCanvas.getContext("2d");
+    context?.clearRect(0, 0, currentCanvas.width, currentCanvas.height);
+    return () => cancelAnimationFrame(frame);
+  }, [idx, plan, clips, style]);
 
   useEffect(() => {
     const a = aud.current; if (!a) return;
-    if (idx === 0) { a.currentTime = musicStart; a.play().catch(() => {}); }
-    if (idx === -1) { a.pause(); vid.current?.pause(); }
+    if (idx === 0) { a.currentTime = musicStart; void a.play().catch(() => {}); }
+    if (idx === -1) { a.pause(); }
   }, [idx, musicStart]);
+
+  useEffect(() => () => {
+    if (downloadUrl) URL.revokeObjectURL(downloadUrl);
+    if (audioContextRef.current) void audioContextRef.current.close();
+  }, [downloadUrl]);
+
+  const playPreview = () => {
+    setRenderError("");
+    playbackFinished.current = false;
+    setIdx(-1);
+    window.setTimeout(() => setIdx(0), 50);
+  };
+
+  const exportVideo = async () => {
+    const mimeType = recordingMimeType();
+    const currentCanvas = canvas.current;
+    const video = vid.current;
+    if (!mimeType || !currentCanvas || !video || !plan.length) {
+      setRenderError("Este navegador não oferece gravação de vídeo compatível.");
+      return;
+    }
+    if (downloadUrl) URL.revokeObjectURL(downloadUrl);
+    setDownloadUrl("");
+    setRenderError("");
+    setProgress(0);
+    setExporting(true);
+
+    const canvasStream = currentCanvas.captureStream(30);
+    let recorderStream = canvasStream;
+    let extraTracks: MediaStreamTrack[] = [];
+    try {
+      if (music && aud.current) {
+        const audioContext = audioContextRef.current ?? new AudioContext();
+        audioContextRef.current = audioContext;
+        const source = audioSourceRef.current ?? audioContext.createMediaElementSource(aud.current);
+        audioSourceRef.current = source;
+        const destination = audioContext.createMediaStreamDestination();
+        source.connect(destination);
+        source.connect(audioContext.destination);
+        recorderStream = new MediaStream([...canvasStream.getVideoTracks(), ...destination.stream.getAudioTracks()]);
+        extraTracks = destination.stream.getAudioTracks();
+        if (audioContext.state === "suspended") await audioContext.resume();
+      } else if (!muted && "captureStream" in video) {
+        const sourceStream = (video as HTMLVideoElement & { captureStream: () => MediaStream }).captureStream();
+        recorderStream = new MediaStream([...canvasStream.getVideoTracks(), ...sourceStream.getAudioTracks()]);
+        extraTracks = sourceStream.getAudioTracks();
+      }
+      const chunks: BlobPart[] = [];
+      const recorder = new MediaRecorder(recorderStream, { mimeType });
+      const done = new Promise<Blob>((resolve, reject) => {
+        recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
+        recorder.onerror = () => reject(new Error("Não foi possível gravar o vídeo."));
+        recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType }));
+      });
+      recorder.start(500);
+      if (aud.current && music) { aud.current.currentTime = musicStart; void aud.current.play().catch(() => {}); }
+      playbackFinished.current = false;
+      setIdx(-1);
+      window.setTimeout(() => setIdx(0), 50);
+      await new Promise<void>((resolve) => {
+        const length = Math.max(0.01, planLength(plan));
+        const startAt = performance.now();
+        const timer = window.setInterval(() => {
+          const elapsed = (performance.now() - startAt) / 1000;
+          setProgress(Math.min(99, Math.round((elapsed / length) * 100)));
+          if (playbackFinished.current) {
+            window.clearInterval(timer);
+            resolve();
+          }
+        }, 100);
+      });
+      recorder.stop();
+      const blob = await done;
+      setDownloadUrl(URL.createObjectURL(blob));
+      setProgress(100);
+      setIdx(-1);
+    } catch (error) {
+      setRenderError(error instanceof Error ? error.message : "Falha ao exportar o vídeo.");
+      setIdx(-1);
+    } finally {
+      recorderStream.getTracks().forEach((track) => track.stop());
+      canvasStream.getTracks().forEach((track) => track.stop());
+      extraTracks.forEach((track) => track.stop());
+      setExporting(false);
+    }
+  };
+
+  const activeSegment = seg;
+  const segmentClip = activeSegment ? clips.find((clip) => clip.id === activeSegment.clipId) : undefined;
+  const effects = activeSegment ? frameEffects(activeSegment, style, 0) : null;
 
   return (
     <div className="grid gap-6 md:grid-cols-[minmax(0,320px)_1fr]">
       <div>
-        <div className={`${aspect} overflow-hidden rounded-xl bg-background`}>
-          <video ref={vid} muted={muted} playsInline className="h-full w-full object-cover transition-transform duration-300"
-            style={{ transform: `scale(${seg?.zoom ?? 1})` }} />
+        <div className={`${aspect} overflow-hidden rounded-lg bg-background`}>
+          <canvas ref={canvas} width={platform === "youtube" ? 1920 : 1080} height={platform === "youtube" ? 1080 : platform === "feed" ? 1080 : 1920} className="h-full w-full object-contain" aria-label="Prévia do vídeo editado" />
+          <video ref={vid} muted={muted} playsInline className="hidden" />
         </div>
         {music && <audio ref={aud} src={music.url} />}
-        <div className="mt-3 flex gap-2">
-          <button onClick={() => setIdx(0)} className="flex-1 rounded-lg bg-primary py-2 font-semibold text-primary-foreground">▶ Prévia</button>
-          <button onClick={onRedo} className="rounded-lg bg-secondary px-4 py-2">Refazer</button>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <Button onClick={playPreview} className="flex-1"><Play /> Prévia editada</Button>
+          <Button onClick={onRedo} variant="secondary" aria-label="Refazer edição" title="Refazer edição"><RotateCcw /></Button>
+          <Button onClick={exportVideo} variant="outline" disabled={exporting || !plan.length}>
+            {exporting ? <LoaderCircle className="animate-spin" /> : <Download />}
+            {exporting ? `Exportando ${progress}%` : "Baixar vídeo"}
+          </Button>
         </div>
+        {exporting && <progress className="mt-3 h-2 w-full accent-primary" value={progress} max={100} aria-label="Progresso da exportação" />}
+        {downloadUrl && <a className="mt-3 inline-flex items-center gap-2 text-sm text-primary underline" href={downloadUrl} download="cutcraft-editado.webm"><Download /> Baixar vídeo editado (.webm)</a>}
+        {renderError && <p role="alert" className="mt-3 text-sm text-destructive">{renderError}</p>}
+        <p className="mt-2 text-xs text-muted-foreground">Efeitos ativos: {effects?.filter ?? "aguardando prévia"}{segmentClip ? ` · ${segmentClip.name}` : ""}</p>
       </div>
       <div>
         <h2 className="text-xl font-semibold">Plano de edição</h2>
-        <p className="font-mono text-xs text-muted-foreground">{plan.length} cortes · {planLength(plan).toFixed(1)}s</p>
+        <p className="font-mono text-xs text-muted-foreground">{plan.length} cortes · {planLength(plan).toFixed(1)}s · filtros, movimento e transições</p>
         <ol className="mt-4 max-h-[420px] space-y-2 overflow-auto pr-2">
           {plan.map((s, i) => (
             <li key={i} className={`rounded-lg border p-3 text-sm ${i === idx ? "border-primary" : "border-border"}`}>
